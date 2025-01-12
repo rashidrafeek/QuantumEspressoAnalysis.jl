@@ -4,170 +4,207 @@ using DataFrames, DelimitedFiles, Printf
 using Unitful, UnitfulAtomic
 
 """
-getfinalenergy(outfile)
+    extract_final_energy(outfile)
 
-Get the final energy from the QE output file, `outfile`.
+Extracts the final energy (in eV) from a Quantum Espresso output file.
+
+# Arguments
+- `outfile::String`: Path to the Quantum Espresso output file.
+
+# Returns
+- `Float64`: Final energy in eV.
 """
-function getfinalenergy(outfile)
-	endat = last(readlines(`grep ! $outfile`))
-	energy = uconvert(u"eV", parse(Float64, split(endat)[5])u"Ry")
+function extract_final_energy(outfile)
+    endat = last(readlines(`grep ! $outfile`))
+    energy = uconvert(u"eV", parse(Float64, split(endat)[5])u"Ry")
+    return energy
 end
 
 """
-    getenthalpy_QEout(fname)
+    compute_enthalpy_from_output(filename; energy_unit=u"Ry")
 
-Grep the final energy, pressure and volume from the given QE output file and 
-return the enthalpy in Ry.
+Computes the enthalpy (energy + pressure * volume) from a Quantum Espresso output file.
+
+# Arguments
+- `filename::String`: Path to the Quantum Espresso output file.
+- `energy_unit::Unitful.FreeUnits`: Unit for energy (default: Ry).
+
+# Returns
+- `Float64`: Enthalpy in the specified energy unit.
 """
-function getenthalpy_QEout(fname; enunit=u"Ry")
+function compute_enthalpy_from_output(filename; energy_unit=u"Ry")
     dat = split.(readlines(pipeline(
-        `grep -E 'unit-cell volume|!|P=' $fname`, `tail -n3`
-       )))
+        `grep -E 'unit-cell volume|!|P=' $filename`, `tail -n3`
+    )))
 
     volume = parse(Float64, dat[1][4])u"bohr^3"
     energy = parse(Float64, dat[2][5])u"Ry"
     pressure = parse(Float64, dat[3][6])u"kbar"
 
-    enthalpy = uconvert(enunit, energy + pressure*volume)
+    enthalpy = uconvert(energy_unit, energy + pressure * volume)
     return enthalpy
 end
 
-function getfinalpressure(fname; prunit=u"GPa")
-    dat = split(last(readlines(`grep -E 'P=' $fname`)))
+"""
+    extract_final_pressure(filename; pressure_unit=u"GPa")
 
+Extracts the final pressure from a Quantum Espresso output file.
+
+# Arguments
+- `filename::String`: Path to the Quantum Espresso output file.
+- `pressure_unit::Unitful.FreeUnits`: Unit for pressure (default: GPa).
+
+# Returns
+- `Float64`: Final pressure in the specified unit.
+"""
+function extract_final_pressure(filename; pressure_unit=u"GPa")
+    dat = split(last(readlines(`grep -E 'P=' $filename`)))
     pressure = parse(Float64, dat[6])u"kbar"
-
-    return uconvert(prunit, pressure)
+    return uconvert(pressure_unit, pressure)
 end
 
 """
-getfinalvolume(outfile)
+    extract_final_volume(outfile)
 
-Get the final volume from the QE output file, `outfile`.
+Extracts the final unit-cell volume from a Quantum Espresso output file.
+
+# Arguments
+- `outfile::String`: Path to the Quantum Espresso output file.
+
+# Returns
+- `Float64`: Final unit-cell volume in bohr³.
 """
-function getfinalvolume(outfile)
+function extract_final_volume(outfile)
     voldat = split(last(readlines(`grep 'unit-cell volume' $outfile`)))
     volume = parse(Float64, voldat[4])u"bohr^3"
-
     return volume
 end
 
-function getfinaldispersionenergy(fname; enunit=u"eV")
-    dat = split(last(readlines(`grep 'Dispersion Correction     =' $fname`)))
+"""
+    extract_dispersion_correction_energy(filename; energy_unit=u"eV")
 
-    en = parse(Float64, dat[4])u"Ry"
+Extracts the dispersion correction energy from a Quantum Espresso output file.
 
-    return uconvert(enunit, en)
+# Arguments
+- `filename::String`: Path to the Quantum Espresso output file.
+- `energy_unit::Unitful.FreeUnits`: Unit for energy (default: eV).
+
+# Returns
+- `Float64`: Dispersion correction energy in the specified unit.
+"""
+function extract_dispersion_correction_energy(filename; energy_unit=u"eV")
+    dat = split(last(readlines(`grep 'Dispersion Correction     =' $filename`)))
+    energy = parse(Float64, dat[4])u"Ry"
+    return uconvert(energy_unit, energy)
 end
 
 """
-    getallQEenthalpies(path, prregex, outformat; natom=40)
+    compute_enthalpies_for_multiple_files(directory, regex, file_format; natoms=40)
 
-Get a `DataFrame` of enthalpies of a set of calculation at different pressures
-given by the files which match `prregex` and QE output file format given by
-`outformat`, a string which can be read by the `@sprintf` macro in `Printf`.
-The output contains columns `:pressure`, `:enthalpy` and `:enthalpyperatom`
-computed based on the given number of atoms, `natom`.
+Computes enthalpies for multiple Quantum Espresso output files matching a pattern.
+
+# Arguments
+- `directory::String`: Directory containing the output files.
+- `regex::Regex`: Regex to identify relevant files.
+- `file_format::String`: Format string to construct file paths (e.g., "file_%d.out").
+- `natoms::Int`: Number of atoms in the system (default: 40).
+
+# Returns
+- `DataFrame`: DataFrame with columns `:pressure`, `:enthalpy`, and `:enthalpy_per_atom`.
 """
-function getallQEenthalpies(path, prregex, outformat; natom=40)
-    prpaths = joinpath.(path, filter(contains(prregex), readdir(path)))
-    pressures = sort(parse.(Int, only.(match.(prregex, prpaths))))
-    fullformat = Printf.Format("$path/$outformat")
-    outfiles = Printf.format.(Ref(fullformat), pressures)
+function compute_enthalpies_for_multiple_files(directory, regex, file_format; natoms=40)
+    file_paths = joinpath.(directory, filter(contains(regex), readdir(directory)))
+    pressures = sort(parse.(Int, only.(match.(regex, file_paths))))
+    formatted_files = Printf.format.(Ref(Printf.Format("$directory/$file_format")), pressures)
 
-    fileexists = isfile.(outfiles)
-
-    if all(fileexists)
-        enthalpies = getenthalpy_QEout.(outfiles)
-    else
-        notexists = findfirst(==(false), fileexists)
-        error("File with path $(outfiles[notexists]) does not exist.")
+    if !all(isfile.(formatted_files))
+        missing_file = findfirst(==(false), isfile.(formatted_files))
+        error("File not found: $(formatted_files[missing_file])")
     end
 
-    enthalpydat = DataFrame(
-        :pressure=>pressures.*u"GPa",
-        :enthalpy=>enthalpies,
-        :enthalpyperatom=>enthalpies./natom
-    )
+    enthalpies = compute_enthalpy_from_output.(formatted_files)
 
-    return enthalpydat
-end
-
-"""
-    get_pdoscolumns(filename, l)
-
-Obtain a dataframe containing the energy and corresponing pdos
-values from a PDOS output file with name, `filename` and containing data for
-angular momentum, `l`.
-"""
-function get_pdoscolumns(filename, l)
-    # Ensure header is in the expected format
-    mult = 2*l + 1
-    headerformat = raw"^# *E \(eV\) +ldosup\(E\) +ldosdw\(E\)"
-    for m in 1:mult
-        headerformat *= raw" +pdosup\(E\) +pdosdw\(E\)"
-    end
-    headerformat *= raw" *$"
-    header = readline(filename)
-    !contains(header, Regex(headerformat)) && error("Unexpected header: $header")
-
-    dat = readdlm(filename; comments=true)
-    size(dat, 2) != 3 + mult*2 && error("Unexpected number of columns")
-
-    lname = l == 0 ? "s" :
-            l == 1 ? "p" :
-            l == 2 ? "d" :
-            l == 3 ? "d" :
-            l == 4 ? "f" : error("Unknown value for l: $l")
-    pdos_colnames = lname .* "_" .* string.(1:mult)
-    pdos_spin_colnames = vec(stack(pdos_colnames) do lname
-        lname .* ["_up", "_down"]
-    end)
-     
     return DataFrame(
-        :energy=>dat[:,1]u"eV",
-        (Symbol.(pdos_spin_colnames) .=> eachcol(dat[:,4:end]))...,
+        :pressure => pressures .* u"GPa",
+        :enthalpy => enthalpies,
+        :enthalpy_per_atom => enthalpies ./ natoms
     )
 end
 
 """
-    get_pdos_atomdataframe(filenames...)
+    parse_pdos_data(filename, l)
 
-Get a dataframe containing energy and pdos values from several files.
+Parses a projected density of states (PDOS) file for a given angular momentum.
+
+# Arguments
+- `filename::String`: Path to the PDOS file.
+- `l::Int`: Angular momentum quantum number (0: s, 1: p, 2: d, 3: f).
+
+# Returns
+- `DataFrame`: DataFrame with energy and PDOS columns.
 """
-function get_pdos_atomdataframe(filenames...)
-    # Detect the angular momentums from filenames
-    l_names = only.(match.(r"_wfc#[0-9]\((.+)\)", filenames))
-    lvals = replace(l_names, "s"=>0, "p"=>1, "d"=>2, "f"=>3)
-    
-    alldata = map(filenames, lvals) do filename, l
-        get_pdoscolumns(filename, l)
-    end
-    
-    if length(alldata) > 1
-        allenergies = getproperty.(alldata, :energy)
-        !allequal(allenergies) && error("Energy column differ between files: $filenames")
-    
-        return innerjoin(alldata...; on=:energy)
+function parse_pdos_data(filename, l)
+    mult = 2 * l + 1
+    header_regex = raw"^# *E \(eV\) +ldosup\(E\) +ldosdw\(E\)" *
+                   repeat(raw" +pdosup\(E\) +pdosdw\(E\)", mult) * raw" *$"
+    header = readline(filename)
+    !contains(header, Regex(header_regex)) && error("Unexpected header: $header")
+
+    data = readdlm(filename; comments=true)
+    size(data, 2) != 3 + mult * 2 && error("Unexpected number of columns")
+
+    lname = l == 0 ? "s" : l == 1 ? "p" : l == 2 ? "d" : l == 3 ? "f" : error("Invalid angular momentum: $l")
+    pdos_names = lname .* "_" .* string.(1:mult)
+    pdos_spin_names = vec(stack(pdos_names) do name name .* ["_up", "_down"] end)
+
+    return DataFrame(
+        :energy => data[:, 1]u"eV",
+        (Symbol.(pdos_spin_names) .=> eachcol(data[:, 4:end]))...
+    )
+end
+
+"""
+    combine_pdos_files(filenames...)
+
+Combines PDOS data from multiple files into a single DataFrame.
+
+# Arguments
+- `filenames::Vararg{String}`: List of PDOS file paths.
+
+# Returns
+- `DataFrame`: Combined DataFrame with energy and PDOS data.
+"""
+function combine_pdos_files(filenames...)
+    l_vals = replace.(only.(match.(r"_wfc#[0-9]\((.+)\)", filenames)), "s" => 0, "p" => 1, "d" => 2, "f" => 3)
+    data_frames = map(parse_pdos_data, filenames, l_vals)
+
+    if length(data_frames) > 1
+        !allequal(getproperty.(data_frames, :energy)) && error("Energy columns differ across files")
+        return innerjoin(data_frames...; on=:energy)
     else
-        return only(alldata)
+        return only(data_frames)
     end
 end
 
 """
-    get_scfout_magnetization(filename)
+    extract_magnetization_from_output(filename)
 
-Get a tuple contaning total and absolute magnetization values respectively from
-the given QE SCF calculation output file.
+Extracts total and absolute magnetization from a Quantum Espresso SCF output file.
+
+# Arguments
+- `filename::String`: Path to the SCF output file.
+
+# Returns
+- `Tuple{Float64, Float64}`: Total and absolute magnetization values.
 """
-function get_scfout_magnetization(filename)
-    dat_tot = only(readlines(pipeline(`grep "total magnetization" $filename`, `tail -n1`)))
-    dat_abs = only(readlines(pipeline(`grep "absolute magnetization" $filename`, `tail -n1`)))
+function extract_magnetization_from_output(filename)
+    tot_mag_line = only(readlines(pipeline(`grep "total magnetization" $filename`, `tail -n1`)))
+    abs_mag_line = only(readlines(pipeline(`grep "absolute magnetization" $filename`, `tail -n1`)))
 
-    tot_mag = parse(Float64, split(dat_tot)[4])
-    abs_mag = parse(Float64, split(dat_abs)[4])
+    total_magnetization = parse(Float64, split(tot_mag_line)[4])
+    absolute_magnetization = parse(Float64, split(abs_mag_line)[4])
 
-    return tot_mag, abs_mag
+    return total_magnetization, absolute_magnetization
 end
 
 end # module
